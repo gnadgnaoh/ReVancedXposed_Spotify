@@ -30,17 +30,8 @@ jobs:
       id: random
       run: echo "NUMBER=$(shuf -i 1-10000 -n 1)" >> $GITHUB_OUTPUT
 
-    - name: Build Debug
-      run: ./gradlew assembleUniversalDebug -PPACKAGE_NAME_SEED=${{ steps.random.outputs.NUMBER }}
-
     - name: Build Release
       run: ./gradlew assembleUniversalRelease -PPACKAGE_NAME_SEED=${{ steps.random.outputs.NUMBER }}
-
-    - name: Upload a Debug Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rvxp-ci-debug-apk
-        path: app/build/outputs/apk/universal/debug
 
     - name: Upload a Release Artifact
       uses: actions/upload-artifact@v4
