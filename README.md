@@ -8,6 +8,25 @@
 > - This is **NOT an official ReVanced project**, do not ask the ReVanced developers for help.
 > - **Root access** is strictly **required** to use this module!
 
+---
+### The Impact of Server-Side Consistency Checks
+
+Starting from late January 2026, the server has implemented a new verification logic 
+that enforces strict **dual-sync checks** for account attributes and configuration data. 
+The server now cross-references your account attributes (such as Subscription Type) and 
+core configuration data in real-time. If client-side modifications or suppressed logics are detected, 
+the server will immediately forcibly terminate the session.
+
+**To prevent frequent logouts, we have adjusted the patches to prioritize usability. **
+
+**Consequently:**
+
+- Audio and visual ads will now appear.
+- Non-functional Download button now visible.
+
+Remember: if you are not paying for the product, **you** are the product.
+
+---
 ### Regarding alleged “new working Spotify mods”:
 
 Recent claims that _Nibrut, Obito, AndroForever and Shizuku_ provide functioning Spotify mods are incorrect.  
