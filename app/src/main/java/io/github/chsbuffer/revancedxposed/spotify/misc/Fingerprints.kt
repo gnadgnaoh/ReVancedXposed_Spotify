@@ -11,10 +11,6 @@ import io.github.chsbuffer.revancedxposed.strings
 import org.luckypray.dexkit.query.enums.StringMatchType
 import org.luckypray.dexkit.query.enums.UsingType
 
-// -----------------------------------------------------------------------------
-// Existing fingerprints (unchanged)
-// -----------------------------------------------------------------------------
-
 val productStateProtoFingerprint = fingerprint {
     returns("Ljava/util/Map;")
     classMatcher { descriptor = "Lcom/spotify/remoteconfig/internal/ProductStateProto;" }
@@ -112,25 +108,10 @@ val pendragonJsonFetchMessageListRequestFingerprint = findMethodDirect {
     }.single()
 }
 
-// -----------------------------------------------------------------------------
-// New fingerprints for Spotify 9.1.32 fixes
-// -----------------------------------------------------------------------------
-
 /**
- * Fix: seek bar locked + shuffle button grayed out.
- *
- * Hooks AutoValue_Restrictions$Builder.build() so every constructed Restrictions
- * instance is cleared before it reaches the player UI layer.
- *
- * Class confirmed in classes7.dex:
- *   Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
- *   Lcom/spotify/player/model/AutoValue_Restrictions;
- *
- * Fields targeted (all confirmed in classes7.dex string pool):
- *   disallowSeekingReasons_          → seek bar locked
- *   disallowTogglingShuffleReasons_  → shuffle button grayed out
- *   disallowSkippingNextReasons_     → skip next locked
- *   disallowSkippingPrevReasons_     → skip prev locked
+ * Fix: seek bar locked + shuffle button grayed out (Spotify 9.1.32).
+ * Hooks AutoValue_Restrictions$Builder.build() to clear disallow fields.
+ * Class confirmed in classes7.dex: Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
  */
 val restrictionsBuilderFingerprint = findMethodDirect {
     findMethod {
@@ -142,32 +123,23 @@ val restrictionsBuilderFingerprint = findMethodDirect {
 }
 
 /**
- * Fix: logout after ~2 minutes of playback caused by Google Maps SDK OAuth token refresh.
+ * Fix: logout after ~2 min caused by Google Maps SDK OAuth token refresh (Spotify 9.1.32).
  *
- * Root cause confirmed in full.log:
- *   20:45:05 — com.google.android.apps.maps opens SpotifyAuthenticationActivity
- *   20:45:06 — Spotify opens AuthorizationActivity (SSO OAuth consent dialog)
- *   20:47:55 — PlaybackState ERROR(7): "Vui lòng đăng nhập"
+ * Root cause confirmed via logcat (two separate log sessions, PIDs 1854/3239/10139):
+ *   Google Maps opens SpotifyAuthenticationActivity → Spotify opens AuthorizationActivity.
+ *   Previous fix (RESULT_OK + null data) caused NPE crash in Google Maps LoginActivity
+ *   (intent.getParcelableExtra on null data) → Google Maps dies → Spotify logout.
+ *   Correct fix: RESULT_CANCELED — Spotify Android SDK handles this gracefully.
  *
- * AuthorizationActivity class confirmed in:
- *   classes3.dex, classes4.dex, classes5.dex, classes7.dex, classes8.dex
- * Full class name: com.spotify.appauthorization.sso.AuthorizationActivity
+ * Class confirmed in classes3/4/5/7/8.dex:
+ *   Lcom/spotify/appauthorization/sso/AuthorizationActivity;
  *
- * We hook onCreate() and auto-approve by calling setResult(RESULT_OK) + finish()
- * before the activity renders, so no UI is shown and the SDK gets a valid grant signal.
- *
- * Note: we use hookAllMethods instead of a DexKit fingerprint because the class name
- * is stable (not obfuscated) across Spotify versions and XposedHelpers.findClass is
- * more reliable for Activity subclasses than DexKit method matching.
- * The fingerprint val below is kept as a typed placeholder for consistency with the
- * rest of the patch; the actual hook is registered directly in UnlockPremiumPatch.kt
- * using XposedHelpers.findClass + XposedBridge.hookAllMethods.
+ * We use XposedHelpers.findClass (stable name) in UnlockPremiumPatch.kt.
+ * This fingerprint is a DexKit fallback only.
  */
 val ssoAuthorizationActivityClass = findClassDirect {
     findClass {
         matcher {
-            // SimilarRegex not needed — class name is stable and not obfuscated.
-            // Use EndsWith so the descriptor prefix "L...;" is handled automatically.
             className(
                 "appauthorization.sso.AuthorizationActivity",
                 StringMatchType.EndsWith
@@ -175,9 +147,7 @@ val ssoAuthorizationActivityClass = findClassDirect {
         }
     }.firstOrNull()
         ?: findClass {
-            // Fallback: find by unique string present only in this class.
-            // "com.spotify.sso.action.START_GOOGLE_AUTH_FLOW_V1" is declared in
-            // classes3.dex and referenced exclusively from AuthorizationActivity.
+            // Fallback: unique string confirmed in classes3.dex only in this class.
             matcher {
                 addUsingString("START_GOOGLE_AUTH_FLOW_V1")
             }
