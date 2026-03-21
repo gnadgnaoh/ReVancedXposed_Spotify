@@ -78,7 +78,6 @@ fun SpotifyHook.UnlockPremium() {
     XposedBridge.hookAllConstructors(
         contextMenuViewModelClazz, object : XC_MethodHook() {
             val isPremiumUpsell = ::isPremiumUpsellField.field
-
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val parameterTypes = (param.method as Constructor<*>).parameterTypes
                 Logger.printDebug { "ContextMenuViewModel(${parameterTypes.joinToString(",") { it.name }})" }
@@ -125,7 +124,6 @@ fun SpotifyHook.UnlockPremium() {
             DexMethod("Lio/reactivex/rxjava3/core/Single;->just(Ljava/lang/Object;)Lio/reactivex/rxjava3/core/Single;").toMethod()
         val onErrorField =
             DexField("Lio/reactivex/rxjava3/internal/operators/single/SingleOnErrorReturn;->b:Lio/reactivex/rxjava3/functions/Function;").toField()
-
         override fun afterHookedMethod(param: MethodHookParam) {
             if (!param.result.javaClass.name.endsWith("SingleOnErrorReturn")) return
             val justError = justMethod.invoke(null, onErrorField.get(param.result))
@@ -137,12 +135,6 @@ fun SpotifyHook.UnlockPremium() {
 
     // -------------------------------------------------------------------------
     // 9. Fix: seek bar locked + shuffle grayed out (Spotify 9.1.32)
-    //
-    // Hooks AutoValue_Restrictions$Builder.build() so every Restrictions instance
-    // is cleared of server-set disallow fields before reaching the player UI.
-    //
-    // Class confirmed in classes7.dex:
-    //   Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
     // -------------------------------------------------------------------------
     runCatching {
         ::restrictionsBuilderFingerprint.hookMethod {
@@ -161,30 +153,34 @@ fun SpotifyHook.UnlockPremium() {
     // -------------------------------------------------------------------------
     // 10. Fix: logout after ~2 min caused by Google Maps SDK OAuth token refresh
     //
-    // Root cause confirmed via logcat (full.log):
-    //   20:43:11 — Spotify starts playing (PID 15221)
-    //   20:45:05 — Google Maps (PID 10139) opens SpotifyAuthenticationActivity
-    //   20:45:06 — Spotify opens AuthorizationActivity (OAuth consent dialog)
-    //   20:47:55 — PlaybackState ERROR(7): "Vui lòng đăng nhập"
+    // Root cause (confirmed via logcat, two sessions):
+    //   Google Maps opens SpotifyAuthenticationActivity → AuthorizationActivity.
     //
-    // Fix: hook AuthorizationActivity.onCreate() and immediately call
-    // setResult(RESULT_OK) + finish() so the OAuth flow completes silently
-    // without interrupting playback or showing any UI.
+    // Previous fix mistake: setResult(RESULT_OK) with null Intent data
+    //   → NPE in LoginActivity.onActivityResult: intent.getParcelableExtra(key) on null
+    //   → Google Maps FATAL EXCEPTION → Spotify logout
+    //   Confirmed at log lines:
+    //     23:04:45 PID 1854  — Failure delivering result{result=-1, data=null}
+    //     23:16:18 PID 3239  — same crash, new Maps process
+    //     23:16:45 PID 11165 — same crash again
     //
-    // We use XposedHelpers.findClass (stable class name, not obfuscated) rather
-    // than the DexKit fingerprint. The ssoAuthorizationActivityClass fingerprint
-    // in Fingerprints.kt serves as a typed fallback if the class name ever changes.
+    // Correct fix: setResult(RESULT_CANCELED)
+    //   The Spotify Android SDK LoginActivity checks result code before reading data.
+    //   RESULT_CANCELED = user dismissed → SDK fires error callback, no NPE, no crash.
+    //   Google Maps continues running. Spotify session stays alive.
+    //
+    // Only deny external callers (callingPackage != null && != "com.spotify.music").
+    // Internal Spotify flows (callingPackage == null or == "com.spotify.music") are
+    // skipped so the user can still log in manually.
     // -------------------------------------------------------------------------
     runCatching {
         val authActivityClass = runCatching {
-            // Primary: class name is stable across Spotify versions.
             XposedHelpers.findClass(
                 "com.spotify.appauthorization.sso.AuthorizationActivity",
                 classLoader
             )
         }.getOrElse {
-            // Fallback: use DexKit fingerprint.
-            Logger.printDebug { "XposedHelpers.findClass failed for AuthorizationActivity, using DexKit fallback" }
+            Logger.printDebug { "findClass failed for AuthorizationActivity, using DexKit fallback" }
             ::ssoAuthorizationActivityClass.clazz
         }
 
@@ -194,31 +190,31 @@ fun SpotifyHook.UnlockPremium() {
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val activity = param.thisObject as android.app.Activity
-
-                    // Only auto-approve if launched by a third-party app (not Spotify itself).
-                    // callingPackage is null when Spotify starts the activity internally for
-                    // its own login flow — we must NOT intercept that case.
                     val callingPackage = activity.callingPackage
+
+                    // Skip internal Spotify auth flows (manual login).
                     if (callingPackage == null || callingPackage == "com.spotify.music") {
                         Logger.printDebug {
-                            "AuthorizationActivity: skipping auto-approve " +
-                                    "(callingPackage=$callingPackage — internal Spotify flow)"
+                            "AuthorizationActivity: skipping — internal Spotify flow " +
+                                    "(callingPackage=$callingPackage)"
                         }
                         return
                     }
 
+                    // External SDK request (Google Maps, etc.) — deny silently.
+                    // RESULT_CANCELED is safe: SDK handles it as "user dismissed"
+                    // without crashing. RESULT_OK with null data caused NPE crash.
                     Logger.printInfo {
-                        "AuthorizationActivity: auto-approving SSO request from $callingPackage"
+                        "AuthorizationActivity: silently denying SSO from $callingPackage"
                     }
-                    UnlockPremiumPatch.autoApproveAuthorization(activity)
+                    UnlockPremiumPatch.silentlyDenyAuthorization(activity)
                 }
             }
         )
-
-        Logger.printInfo { "UnlockPremium: SSO auto-approve hook installed (logout fix)" }
+        Logger.printInfo { "UnlockPremium: SSO deny hook installed (logout fix)" }
     }.onFailure { ex ->
         Logger.printException(
-            { "UnlockPremium: SSO hook failed — third-party apps may still trigger logout" }, ex
+            { "UnlockPremium: SSO hook failed — Google Maps may still trigger logout" }, ex
         )
     }
 }
