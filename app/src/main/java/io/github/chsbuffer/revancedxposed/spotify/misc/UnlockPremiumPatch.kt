@@ -121,4 +121,37 @@ fun SpotifyHook.UnlockPremium() {
 
     ::pendragonJsonFetchMessageRequestFingerprint.hookMethod(replaceFetchRequestSingleWithError)
     ::pendragonJsonFetchMessageListRequestFingerprint.hookMethod(replaceFetchRequestSingleWithError)
+
+    // Fix for Spotify 9.1.32: Hook Restrictions$Builder.build() to clear server-sent
+    // playback restrictions that lock the seek bar and gray out the shuffle button.
+    //
+    // Root cause (confirmed from classes7.dex analysis):
+    //   - Spotify server sends a Restrictions protobuf with free-account player state.
+    //   - Fields disallowSeekingReasons_ and disallowTogglingShuffleReasons_ are populated
+    //     with restriction reasons, causing the UI to disable seeking and shuffle toggling.
+    //   - These restrictions are applied at UI render time, independently of the account
+    //     attribute overrides done in overrideAttributes(). Overriding attributes alone
+    //     is NOT sufficient to fix the seek/shuffle issue in 9.1.32.
+    //
+    // Fix: intercept every Restrictions instance right after it is built and clear
+    //      the disallow fields so the player UI sees a fully unrestricted state.
+    //
+    // Class confirmed in classes7.dex:
+    //   Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
+    //   Lcom/spotify/player/model/AutoValue_Restrictions;
+    runCatching {
+        ::restrictionsBuilderFingerprint.hookMethod {
+            after { param ->
+                val result = param.result ?: return@after
+                UnlockPremiumPatch.clearPlayerRestrictions(result)
+            }
+        }
+        Logger.printInfo { "UnlockPremium: Restrictions hook installed successfully" }
+    }.onFailure { ex ->
+        // Log but do not crash — other hooks (attribute overrides, pendragon, etc.) still work.
+        Logger.printException(
+            { "UnlockPremium: Failed to install Restrictions hook. Seek/shuffle may be locked." },
+            ex
+        )
+    }
 }

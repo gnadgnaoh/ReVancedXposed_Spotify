@@ -106,3 +106,27 @@ val pendragonJsonFetchMessageListRequestFingerprint = findMethodDirect {
         }
     }.single()
 }
+
+/**
+ * Fix for Spotify 9.1.32: Hook the Restrictions protobuf builder to clear
+ * server-sent playback restrictions that lock the seek bar and gray out shuffle.
+ *
+ * Confirmed present in classes7.dex:
+ *   Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
+ *   Lcom/spotify/player/model/AutoValue_Restrictions;
+ *
+ * The server sends a Restrictions object with every player state update for free accounts.
+ * Overriding account attributes alone is not sufficient in 9.1.32 because the UI reads
+ * disallowSeekingReasons_ and disallowTogglingShuffleReasons_ directly from this object.
+ *
+ * We hook build() on the AutoValue-generated Builder so every constructed Restrictions
+ * instance is cleared before it reaches the UI layer.
+ */
+val restrictionsBuilderFingerprint = findMethodDirect {
+    findMethod {
+        matcher {
+            name("build")
+            declaredClass("AutoValue_Restrictions\$Builder", StringMatchType.EndsWith)
+        }
+    }.single()
+}
