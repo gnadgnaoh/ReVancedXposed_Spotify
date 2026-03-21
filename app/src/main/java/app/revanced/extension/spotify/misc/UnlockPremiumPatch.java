@@ -1,11 +1,16 @@
 /*
  * Custom changes:
- * Wipe stubbed types: REMOVED_HOME_SECTIONS, overrideAttributes, removeHomeSections
- * Fix for Spotify 9.1.32.2083:
- *   - Added on-demand-restricted=false, ad-based-on-demand=false to prevent FORCED_LOGOUT
- *   - Added clearPlayerRestrictions() to fix disallowSeekingReasons_ (seek bar locked)
- *   - Added clearPlayerRestrictions() to fix disallowTogglingShuffleReasons_ (shuffle grayed out)
- * */
+ * - Wipe stubbed types: REMOVED_HOME_SECTIONS, overrideAttributes, removeHomeSections
+ * - Fix Spotify 9.1.32.2083:
+ *     [LOGOUT] Added on-demand-restricted=false, ad-based-on-demand=false to PREMIUM_OVERRIDES
+ *     [SEEK]   Added clearPlayerRestrictions() — clears disallowSeekingReasons_ from server proto
+ *     [SHUFFLE] clearPlayerRestrictions() also clears disallowTogglingShuffleReasons_
+ *     [LOGOUT] Added autoApproveAuthorization() — fixes Google Maps SDK triggering re-auth
+ *              after ~2 min of playback. Root cause confirmed via logcat:
+ *              com.google.android.apps.maps/SpotifyAuthenticationActivity (PID 10139)
+ *              → com.spotify.appauthorization.sso.AuthorizationActivity (PID 15221)
+ *              at 20:45:05, exactly 2 min after playback started at 20:43:11.
+ */
 package app.revanced.extension.spotify.misc;
 
 import static java.lang.Boolean.FALSE;
@@ -23,19 +28,13 @@ import de.robv.android.xposed.XposedHelpers;
 public final class UnlockPremiumPatch {
 
     private static class OverrideAttribute {
-        /**
-         * Account attribute key.
-         */
+        /** Account attribute key. */
         final String key;
-
-        /**
-         * Override value.
-         */
+        /** Override value. */
         final Object overrideValue;
-
         /**
-         * If this attribute is expected to be present in all situations.
-         * If false, then no error is raised if the attribute is missing.
+         * If true, logs an error when the attribute is missing.
+         * Set false for keys that only exist in some Spotify versions.
          */
         final boolean isExpected;
 
@@ -63,7 +62,7 @@ public final class UnlockPremiumPatch {
             // Make sure playing songs is not disabled remotely and playlists show up.
             new OverrideAttribute("streaming", TRUE),
             // Allows adding songs to queue and removes the smart shuffle mode restriction,
-            // allowing to pick any of the other modes. Flag is not present in legacy app target.
+            // allowing to pick any of the other modes.
             new OverrideAttribute("pick-and-shuffle", FALSE),
             // Disables shuffle-mode streaming-rule, which forces songs to be played shuffled
             // and breaks the player when other patches are applied.
@@ -71,25 +70,22 @@ public final class UnlockPremiumPatch {
             // Enables premium UI in settings and removes the premium button in the nav-bar.
             new OverrideAttribute("nft-disabled", "1"),
             // Enable Spotify Connect and disable other premium related UI, like buying premium.
-            // It also removes the download button.
+            // Also removes the download button.
             new OverrideAttribute("type", "premium"),
-            // Enable Spotify Car Thing hardware device.
-            // Device is discontinued and no longer works with the latest releases,
-            // but it might still work with older app targets.
+            // Enable Spotify Car Thing hardware device (discontinued).
             new OverrideAttribute("can_use_superbird", TRUE, false),
             // Removes the premium button in the nav-bar for tablet users.
             new OverrideAttribute("tablet-free", FALSE, false),
-            // Fix for 9.1.32: Prevents FORCED_LOGOUT triggered by server detecting
-            // free-tier account streaming without ads. Found in classes5.dex.
+            // Fix 9.1.32: prevents server from flagging free account streaming without ads.
+            // String confirmed present in classes5.dex.
             new OverrideAttribute("on-demand-restricted", FALSE, false),
-            // Fix for 9.1.32: Disables ad-based on-demand mode check that causes
-            // session invalidation. Found in classes8.dex.
+            // Fix 9.1.32: disables ad-based on-demand mode check that triggers session
+            // invalidation / FORCED_LOGOUT. Confirmed in classes8.dex.
             new OverrideAttribute("ad-based-on-demand", FALSE, false)
     );
 
     /**
-     * A list of home sections feature types ids which should be removed. These ids match the ones from the protobuf
-     * response which delivers home sections.
+     * A list of home section feature type ids to remove (ad sections).
      */
     private static final List<Integer> REMOVED_HOME_SECTIONS = List.of(
             com.spotify.home.evopage.homeapi.proto.Section.VIDEO_BRAND_AD_FIELD_NUMBER,
@@ -97,15 +93,18 @@ public final class UnlockPremiumPatch {
     );
 
     /**
-     * A list of browse sections feature types ids which should be removed. These ids match the ones from the protobuf
-     * response which delivers browse sections.
+     * A list of browse section feature type ids to remove (ad sections).
      */
     private static final List<Integer> REMOVED_BROWSE_SECTIONS = List.of(
             com.spotify.browsita.v1.resolved.Section.BRAND_ADS_FIELD_NUMBER
     );
 
+    // -------------------------------------------------------------------------
+    // Injection points
+    // -------------------------------------------------------------------------
+
     /**
-     * Injection point. Override account attributes.
+     * Injection point. Override account attributes from ProductStateProto.
      */
     public static void overrideAttributes(Map<String, ?> attributes) {
         try {
@@ -120,16 +119,12 @@ public final class UnlockPremiumPatch {
                 }
 
                 Object overrideValue = override.overrideValue;
-                Object originalValue;
-                originalValue = XposedHelpers.getObjectField(attribute, "value_");
+                Object originalValue = XposedHelpers.getObjectField(attribute, "value_");
 
-                if (overrideValue.equals(originalValue)) {
-                    continue;
-                }
+                if (overrideValue.equals(originalValue)) continue;
 
                 Logger.printInfo(() -> "Overriding account attribute " + override.key +
                         " from " + originalValue + " to " + overrideValue);
-
                 XposedHelpers.setObjectField(attribute, "value_", overrideValue);
             }
         } catch (Exception ex) {
@@ -151,45 +146,30 @@ public final class UnlockPremiumPatch {
     }
 
     /**
-     * Injection point. Clear player restrictions set by server for free accounts.
-     * <p>
-     * Spotify 9.1.32 sends a Restrictions protobuf alongside each player state update.
-     * This object contains fields like disallowSeekingReasons_ and
-     * disallowTogglingShuffleReasons_ which lock the seek bar and gray out the
-     * shuffle button at the UI layer — independently of the account attribute overrides.
-     * <p>
-     * We clear these fields after the Restrictions object is built so the player UI
-     * treats the session as fully unrestricted.
-     * <p>
-     * Field names confirmed present in classes7.dex:
-     *   disallowSeekingReasons_              → seek bar locked
-     *   disallowTogglingShuffleReasons_      → shuffle button grayed out
-     *   disallowSkippingNextReasons_         → skip next disabled
-     *   disallowSkippingPrevReasons_         → skip prev disabled
-     *   allowSeeking_                        → explicit allow flag (set to true)
+     * Injection point. Clear server-sent playback restrictions from Restrictions protobuf.
+     *
+     * In Spotify 9.1.32 the server sends a Restrictions protobuf object alongside every
+     * player state update for free accounts. The player UI reads restriction fields
+     * directly from this object, so overriding account attributes alone is not sufficient.
+     *
+     * Fields confirmed in classes7.dex:
+     *   disallowSeekingReasons_          → seek bar locked       (fix: seek)
+     *   disallowTogglingShuffleReasons_  → shuffle grayed out    (fix: shuffle)
+     *   disallowSkippingNextReasons_     → skip next disabled
+     *   disallowSkippingPrevReasons_     → skip prev disabled
+     *   disallowPausingReasons_          → pause disabled (free radio)
+     *   allowSeeking_                    → explicit allow flag
      */
     public static void clearPlayerRestrictions(Object restrictions) {
         try {
-            // Fix: seek bar locked — clear the list of reasons that disable seeking.
             clearField(restrictions, "disallowSeekingReasons_");
-
-            // Fix: shuffle button grayed out — clear the list of reasons disabling shuffle toggle.
             clearField(restrictions, "disallowTogglingShuffleReasons_");
-
-            // Extra: clear skip restrictions so previous/next track works freely.
             clearField(restrictions, "disallowSkippingNextReasons_");
             clearField(restrictions, "disallowSkippingPrevReasons_");
-
-            // Extra: clear pause restriction (sometimes set for free radio playback).
             clearField(restrictions, "disallowPausingReasons_");
-
-            // Extra: explicitly enable seeking if the allowSeeking_ boolean field exists.
             try {
                 XposedHelpers.setBooleanField(restrictions, "allowSeeking_", true);
-            } catch (NoSuchFieldError ignored) {
-                // Field may not exist in all versions — safe to ignore.
-            }
-
+            } catch (NoSuchFieldError ignored) { /* not present in all versions */ }
             Logger.printInfo(() -> "clearPlayerRestrictions: seek + shuffle + skip unlocked");
         } catch (Exception ex) {
             Logger.printException(() -> "clearPlayerRestrictions failure", ex);
@@ -197,9 +177,43 @@ public final class UnlockPremiumPatch {
     }
 
     /**
-     * Null-safe helper: sets a List/Object field to null to effectively clear it.
-     * Silently ignores NoSuchFieldError so the hook survives minor protobuf refactors.
+     * Injection point. Auto-approve SSO authorization requests from third-party apps.
+     *
+     * Root cause confirmed in full.log:
+     *   Google Maps (PID 10139) uses the Spotify Android SDK to control playback.
+     *   After ~2 minutes the SDK OAuth token expires. Maps opens:
+     *     SpotifyAuthenticationActivity (com.google.android.apps.maps, 20:45:05)
+     *   which causes Spotify to present:
+     *     AuthorizationActivity (com.spotify.appauthorization.sso, 20:45:06)
+     *   This interrupts playback. At 20:47:55 PlaybackState → ERROR(7):
+     *     "Vui lòng đăng nhập để sử dụng Spotify."
+     *
+     * Fix: intercept AuthorizationActivity.onCreate() and immediately return RESULT_OK
+     * so the SDK treats the grant as approved without showing any UI to the user.
+     * The SSO layer handles actual token provisioning internally after the activity
+     * returns — we only need to signal consent.
+     *
+     * @param authorizationActivity the intercepted AuthorizationActivity instance.
      */
+    public static void autoApproveAuthorization(android.app.Activity authorizationActivity) {
+        try {
+            String callingPackage = authorizationActivity.getCallingPackage();
+            Logger.printInfo(() -> "autoApproveAuthorization: auto-approving SSO request" +
+                    (callingPackage != null ? " from " + callingPackage : ""));
+            // RESULT_OK signals approval to the requesting SDK.
+            authorizationActivity.setResult(android.app.Activity.RESULT_OK);
+            authorizationActivity.finish();
+            Logger.printInfo(() -> "autoApproveAuthorization: AuthorizationActivity finished silently");
+        } catch (Exception ex) {
+            Logger.printException(() -> "autoApproveAuthorization failure", ex);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /** Null-safe field clearer. Ignores NoSuchFieldError for cross-version safety. */
     private static void clearField(Object obj, String fieldName) {
         try {
             XposedHelpers.setObjectField(obj, fieldName, null);
@@ -220,7 +234,6 @@ public final class UnlockPremiumPatch {
     ) {
         try {
             Iterator<T> iterator = sections.iterator();
-
             while (iterator.hasNext()) {
                 T section = iterator.next();
                 int featureTypeId = featureTypeExtractor.getFeatureTypeId(section);
