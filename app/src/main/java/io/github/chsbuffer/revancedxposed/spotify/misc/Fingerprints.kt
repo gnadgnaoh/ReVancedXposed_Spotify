@@ -166,9 +166,11 @@ val restrictionsBuilderFingerprint = findMethodDirect {
 val ssoAuthorizationActivityClass = findClassDirect {
     findClass {
         matcher {
+            // SimilarRegex not needed — class name is stable and not obfuscated.
+            // Use EndsWith so the descriptor prefix "L...;" is handled automatically.
             className(
-                "com.spotify.appauthorization.sso.AuthorizationActivity",
-                StringMatchType.Equal
+                "appauthorization.sso.AuthorizationActivity",
+                StringMatchType.EndsWith
             )
         }
     }.firstOrNull()
