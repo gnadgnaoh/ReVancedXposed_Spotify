@@ -11,6 +11,10 @@ import io.github.chsbuffer.revancedxposed.strings
 import org.luckypray.dexkit.query.enums.StringMatchType
 import org.luckypray.dexkit.query.enums.UsingType
 
+// -----------------------------------------------------------------------------
+// Existing fingerprints (unchanged)
+// -----------------------------------------------------------------------------
+
 val productStateProtoFingerprint = fingerprint {
     returns("Ljava/util/Map;")
     classMatcher { descriptor = "Lcom/spotify/remoteconfig/internal/ProductStateProto;" }
@@ -26,6 +30,7 @@ val buildQueryParametersFingerprint = findMethodDirect {
         }
     }.single()
 }
+
 val contextFromJsonFingerprint = fingerprint {
     opcodes(
         Opcode.INVOKE_STATIC,
@@ -107,20 +112,25 @@ val pendragonJsonFetchMessageListRequestFingerprint = findMethodDirect {
     }.single()
 }
 
+// -----------------------------------------------------------------------------
+// New fingerprints for Spotify 9.1.32 fixes
+// -----------------------------------------------------------------------------
+
 /**
- * Fix for Spotify 9.1.32: Hook the Restrictions protobuf builder to clear
- * server-sent playback restrictions that lock the seek bar and gray out shuffle.
+ * Fix: seek bar locked + shuffle button grayed out.
  *
- * Confirmed present in classes7.dex:
+ * Hooks AutoValue_Restrictions$Builder.build() so every constructed Restrictions
+ * instance is cleared before it reaches the player UI layer.
+ *
+ * Class confirmed in classes7.dex:
  *   Lcom/spotify/player/model/AutoValue_Restrictions$Builder;
  *   Lcom/spotify/player/model/AutoValue_Restrictions;
  *
- * The server sends a Restrictions object with every player state update for free accounts.
- * Overriding account attributes alone is not sufficient in 9.1.32 because the UI reads
- * disallowSeekingReasons_ and disallowTogglingShuffleReasons_ directly from this object.
- *
- * We hook build() on the AutoValue-generated Builder so every constructed Restrictions
- * instance is cleared before it reaches the UI layer.
+ * Fields targeted (all confirmed in classes7.dex string pool):
+ *   disallowSeekingReasons_          → seek bar locked
+ *   disallowTogglingShuffleReasons_  → shuffle button grayed out
+ *   disallowSkippingNextReasons_     → skip next locked
+ *   disallowSkippingPrevReasons_     → skip prev locked
  */
 val restrictionsBuilderFingerprint = findMethodDirect {
     findMethod {
@@ -129,4 +139,45 @@ val restrictionsBuilderFingerprint = findMethodDirect {
             declaredClass("AutoValue_Restrictions\$Builder", StringMatchType.EndsWith)
         }
     }.single()
+}
+
+/**
+ * Fix: logout after ~2 minutes of playback caused by Google Maps SDK OAuth token refresh.
+ *
+ * Root cause confirmed in full.log:
+ *   20:45:05 — com.google.android.apps.maps opens SpotifyAuthenticationActivity
+ *   20:45:06 — Spotify opens AuthorizationActivity (SSO OAuth consent dialog)
+ *   20:47:55 — PlaybackState ERROR(7): "Vui lòng đăng nhập"
+ *
+ * AuthorizationActivity class confirmed in:
+ *   classes3.dex, classes4.dex, classes5.dex, classes7.dex, classes8.dex
+ * Full class name: com.spotify.appauthorization.sso.AuthorizationActivity
+ *
+ * We hook onCreate() and auto-approve by calling setResult(RESULT_OK) + finish()
+ * before the activity renders, so no UI is shown and the SDK gets a valid grant signal.
+ *
+ * Note: we use hookAllMethods instead of a DexKit fingerprint because the class name
+ * is stable (not obfuscated) across Spotify versions and XposedHelpers.findClass is
+ * more reliable for Activity subclasses than DexKit method matching.
+ * The fingerprint val below is kept as a typed placeholder for consistency with the
+ * rest of the patch; the actual hook is registered directly in UnlockPremiumPatch.kt
+ * using XposedHelpers.findClass + XposedBridge.hookAllMethods.
+ */
+val ssoAuthorizationActivityClass = findClassDirect {
+    findClass {
+        matcher {
+            className(
+                "com.spotify.appauthorization.sso.AuthorizationActivity",
+                StringMatchType.Equal
+            )
+        }
+    }.firstOrNull()
+        ?: findClass {
+            // Fallback: find by unique string present only in this class.
+            // "com.spotify.sso.action.START_GOOGLE_AUTH_FLOW_V1" is declared in
+            // classes3.dex and referenced exclusively from AuthorizationActivity.
+            matcher {
+                addUsingString("START_GOOGLE_AUTH_FLOW_V1")
+            }
+        }.first()
 }
