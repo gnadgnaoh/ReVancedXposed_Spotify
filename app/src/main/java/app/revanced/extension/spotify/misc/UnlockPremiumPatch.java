@@ -1,6 +1,10 @@
 /*
  * Custom changes:
  * Wipe stubbed types: REMOVED_HOME_SECTIONS, overrideAttributes, removeHomeSections
+ * Fix for Spotify 9.1.32.2083:
+ *   - Added on-demand-restricted=false, ad-based-on-demand=false to prevent FORCED_LOGOUT
+ *   - Added clearPlayerRestrictions() to fix disallowSeekingReasons_ (seek bar locked)
+ *   - Added clearPlayerRestrictions() to fix disallowTogglingShuffleReasons_ (shuffle grayed out)
  * */
 package app.revanced.extension.spotify.misc;
 
@@ -74,7 +78,13 @@ public final class UnlockPremiumPatch {
             // but it might still work with older app targets.
             new OverrideAttribute("can_use_superbird", TRUE, false),
             // Removes the premium button in the nav-bar for tablet users.
-            new OverrideAttribute("tablet-free", FALSE, false)
+            new OverrideAttribute("tablet-free", FALSE, false),
+            // Fix for 9.1.32: Prevents FORCED_LOGOUT triggered by server detecting
+            // free-tier account streaming without ads. Found in classes5.dex.
+            new OverrideAttribute("on-demand-restricted", FALSE, false),
+            // Fix for 9.1.32: Disables ad-based on-demand mode check that causes
+            // session invalidation. Found in classes8.dex.
+            new OverrideAttribute("ad-based-on-demand", FALSE, false)
     );
 
     /**
@@ -137,6 +147,65 @@ public final class UnlockPremiumPatch {
         } catch (Exception ex) {
             Logger.printException(() -> "removeStationString failure", ex);
             return spotifyUriOrUrl;
+        }
+    }
+
+    /**
+     * Injection point. Clear player restrictions set by server for free accounts.
+     * <p>
+     * Spotify 9.1.32 sends a Restrictions protobuf alongside each player state update.
+     * This object contains fields like disallowSeekingReasons_ and
+     * disallowTogglingShuffleReasons_ which lock the seek bar and gray out the
+     * shuffle button at the UI layer — independently of the account attribute overrides.
+     * <p>
+     * We clear these fields after the Restrictions object is built so the player UI
+     * treats the session as fully unrestricted.
+     * <p>
+     * Field names confirmed present in classes7.dex:
+     *   disallowSeekingReasons_              → seek bar locked
+     *   disallowTogglingShuffleReasons_      → shuffle button grayed out
+     *   disallowSkippingNextReasons_         → skip next disabled
+     *   disallowSkippingPrevReasons_         → skip prev disabled
+     *   allowSeeking_                        → explicit allow flag (set to true)
+     */
+    public static void clearPlayerRestrictions(Object restrictions) {
+        try {
+            // Fix: seek bar locked — clear the list of reasons that disable seeking.
+            clearField(restrictions, "disallowSeekingReasons_");
+
+            // Fix: shuffle button grayed out — clear the list of reasons disabling shuffle toggle.
+            clearField(restrictions, "disallowTogglingShuffleReasons_");
+
+            // Extra: clear skip restrictions so previous/next track works freely.
+            clearField(restrictions, "disallowSkippingNextReasons_");
+            clearField(restrictions, "disallowSkippingPrevReasons_");
+
+            // Extra: clear pause restriction (sometimes set for free radio playback).
+            clearField(restrictions, "disallowPausingReasons_");
+
+            // Extra: explicitly enable seeking if the allowSeeking_ boolean field exists.
+            try {
+                XposedHelpers.setBooleanField(restrictions, "allowSeeking_", true);
+            } catch (NoSuchFieldError ignored) {
+                // Field may not exist in all versions — safe to ignore.
+            }
+
+            Logger.printInfo(() -> "clearPlayerRestrictions: seek + shuffle + skip unlocked");
+        } catch (Exception ex) {
+            Logger.printException(() -> "clearPlayerRestrictions failure", ex);
+        }
+    }
+
+    /**
+     * Null-safe helper: sets a List/Object field to null to effectively clear it.
+     * Silently ignores NoSuchFieldError so the hook survives minor protobuf refactors.
+     */
+    private static void clearField(Object obj, String fieldName) {
+        try {
+            XposedHelpers.setObjectField(obj, fieldName, null);
+            Logger.printDebug(() -> "Cleared field: " + fieldName);
+        } catch (NoSuchFieldError e) {
+            Logger.printDebug(() -> "Field not found (skipped): " + fieldName);
         }
     }
 
